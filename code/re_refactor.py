@@ -1,0 +1,539 @@
+#去掉注释
+#还原重命名，提取
+import re
+types = [
+    'static ', 'struct ', 'int ', 'short ', 'long ', 'long long ', 'unsigned int ',
+    'unsigned short ', 'unsigned long ', 'unsigned long long ', 'signed int ',
+    'signed short ', 'signed long ', 'signed long long ', 'float ', 'double ',
+    'long double ', 'char ', 'unsigned char ', 'signed char ', 'void ', 'enum ', 'union ','__cold'
+]
+
+
+def find_new_functions(lines):
+    # 初始化一个布尔值来跟踪是否在函数体内
+    in_function_body = False
+    # 初始化一个列表来存储识别到的新增函数
+    new_functions = []
+    # 初始化一个列表来存储当前函数的行
+    current_function = []
+    for line in lines:
+        # 忽略空行
+        if not line.strip():
+            continue
+
+            # 检查行是否以+开头，这表示它可能是新增的行
+        if line.startswith('+'):
+            # 去除+前缀
+            stripped_line = line[1:]
+
+                # 检查是否是函数定义的开始
+            if any(stripped_line.startswith(t) for t in types) and '(' in stripped_line and ')' in stripped_line:
+                # 这是一个新的函数定义，开始收集行
+                current_function.append(stripped_line)
+                in_function_body = True
+                # 如果不是函数定义且不在函数体内，则忽略此行
+
+            # 检查是否是函数体的结束
+            # 如果有部分函数定义没有关闭（例如，输入被截断），则不添加到结果中
+            elif stripped_line.endswith('}'):
+                # 如果在函数体内，则当前函数定义结束
+                if in_function_body:
+                    # 检查函数体是否以{开头
+                    current_function.append(stripped_line)
+                    if '{' in ''.join(current_function):
+                        # 完整的函数定义，添加到结果列表中
+                        new_functions.append(current_function)
+                        # 重置函数收集器和状态
+                        current_function = []
+                        in_function_body = False
+            # 如果在函数体内，则继续收集行
+            elif in_function_body:
+                current_function.append(stripped_line)
+
+    return new_functions
+
+def extract_function_name(c_code_line):
+    # Define a regex pattern to match function definitions and capture the function name
+    pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)\s*\{?'
+    match = re.search(pattern, c_code_line)
+    if match:
+        return match.group(1)
+    return None
+
+
+def contains_element_but_not_function_def(line, element):
+    # Check if the line starts with +
+    if not line.startswith('+'):
+        return False
+
+    # Remove the leading + for further checks
+    line = line[1:]
+
+    # Define a regex pattern to match function definitions
+    function_def_pattern =  r'^\s*(?:[\w\*]+\s+)+([\w\*]+)\s*\([^)]*\)\s*(?:\{)?\s*$'
+
+    # Check if the line contains the specified element
+    if element in line:
+        # Check if the line is a function definition
+        if re.search(function_def_pattern, line.strip()):
+            return False
+        return True
+    return False
+
+def extract_function_body(lines):
+    function_body = []
+    inside_function = False
+
+    for line in lines:
+        stripped_line = line.strip()
+        if stripped_line == '{':
+            inside_function = True
+            continue
+        elif stripped_line == '}':
+            inside_function = False
+            continue
+
+        if inside_function:
+            function_body.append(line.strip())
+
+    return function_body
+
+
+def contains_function_body(diff_lines, function_body):
+
+    stripped_function_body = [line.strip() for line in function_body]
+    stripped_diff_lines = [line[1:].strip() for line in diff_lines if line.startswith('-')]
+
+
+    # Check if stripped_function_body is a subsequence of stripped_diff_lines
+    def is_subsequence(sub, main):
+
+        iter_main = iter(main)
+
+        return all(any(item == sub_item for sub_item in iter_main) for item in sub)
+
+    return is_subsequence(stripped_function_body, stripped_diff_lines)
+
+def remove_sublist_new(main_list, sublist):
+    """
+    从主列表中删除指定的子列表
+    :param main_list: 主列表
+    :param sublist: 要删除的子列表
+    :return: 修改后的列表
+    """
+    sublist_with_plus = ['+' + line for line in sublist]
+    sublist_len = len(sublist_with_plus)
+
+    for i in range(len(main_list)):
+        if main_list[i:i + sublist_len] == sublist_with_plus:
+            del main_list[i:i + sublist_len]
+            break
+    return main_list
+
+def normalize_line(line):
+    """
+    去除行中的所有空格和制表符
+    :param line: 原始行
+    :return: 标准化后的行
+    """
+    return line.replace('\t', '').replace(' ', '')
+
+
+def remove_sublist_tran_1(main_list, sublist):
+    """
+    从主列表中删除指定的子列表，忽略行前可能存在的空格和制表符
+    :param main_list: 主列表
+    :param sublist: 要删除的子列表
+    :return: 修改后的列表
+    """
+    sublist_with_plus = ['-' + line for line in sublist]
+    normalized_sublist = [normalize_line(line) for line in sublist_with_plus]
+    sublist_len = len(normalized_sublist)
+
+    for i in range(len(main_list) - sublist_len + 1):
+        # 标准化主列表中的部分
+        main_list_segment = [normalize_line(line) for line in main_list[i:i + sublist_len]]
+        if main_list_segment == normalized_sublist:
+            del main_list[i:i + sublist_len]
+            break
+
+    return main_list
+
+def remove_sublist_tran_2(lst, substrings):
+    result_list = [line for line in lst if substrings not in line]
+    return result_list
+
+
+def clean_and_check_list(lst):
+    """
+    判断列表中是否存在+或-开头的元素，并清理无效的+或-开头的元素
+    :param lst: 要检查和清理的列表
+    :return: 清理后是否存在有效的+或-开头的元素
+    """
+    # 清理无效的+或-开头的元素
+    cleaned_list = [
+        line for line in lst
+        if not ((line.startswith('+') or line.startswith('-')) and line.strip() in ('+', '-', ''))
+    ]
+
+    # 判断是否存在有效的+或-开头的元素
+    for line in cleaned_list:
+        if (line.startswith('+') or line.startswith('-')) and line.strip() not in ('+', '-', ''):
+            return True
+    return False
+
+def detect_extracted_method(diff):
+    #对patch进行分段存储
+    flag=0
+    list=[]
+    list1=[]
+    for line in diff:
+        line=line.rstrip()
+        if line.startswith('@@'):
+            if list1==[]:
+                list1.append(line)
+                continue
+            else:
+                list.append(list1)
+                list1=[]
+                list1.append(line)
+                continue
+        list1.append(line)
+    list.append(list1)
+
+    new=False
+    refactor=False
+    for ev_list in list:
+        flag = flag + 1
+        # 步骤1：识别新增函数定义
+        new_funcs = find_new_functions(ev_list)
+
+        if new_funcs!=[]:
+            #print("存在新增函数")
+            new_func_flag=flag
+            new_func_code = new_funcs[0]
+
+    # 步骤2：查找新增函数的调用
+            for line in new_funcs[0]:
+                if any(line.startswith(t) for t in types) and '(' in line and ')' in line:
+                    func_name=extract_function_name(line)
+            #print(func_name)
+            func_body=extract_function_body(new_funcs[0])
+            #print(func_body)
+            new=True
+
+    if new==True:
+        flag=0
+        for ev_list in list:
+            flag = flag + 1
+            trans_flag=False
+            for line in ev_list:
+                if contains_element_but_not_function_def(line,func_name):
+                    #print("存在新函数的调用")
+                    trans_flag=True
+
+            # 步骤3：查找与新增函数相似内容的删除（简化处理，仅考虑函数名作为匹配依据）
+            if trans_flag==True:
+                #print(ev_list)
+                if contains_function_body(ev_list, func_body):
+                    tran_func_flag=flag
+                    refactor=True
+                    print("存在重构")
+
+        if refactor==True:
+            # print(new_func_flag)
+            # print(tran_func_flag)
+            # print(new_func_code)
+            flag=0
+            for ev_list in list:
+                flag = flag + 1
+                if flag==new_func_flag and new_func_flag!=0:
+
+                    # 删除子列表
+                    result_new_list = remove_sublist_new(ev_list, new_func_code)
+
+                if flag==tran_func_flag and tran_func_flag!=0:
+                    #删除函数调用，删除函数体
+                    result_tran_list_1 = remove_sublist_tran_1(ev_list, func_body)
+                    #print(func_name)
+                    result_tran_list_2 = remove_sublist_tran_2(result_tran_list_1, func_name)
+
+
+            list[new_func_flag-1]=result_new_list
+            list[tran_func_flag-1]=result_tran_list_2
+
+    real_list=[]
+    for diff in list:
+        if clean_and_check_list(diff):
+            real_list.append(diff)
+
+    return real_list
+
+
+
+
+def refactor_detect_extracted(patch_file):
+    with open(patch_file,"r")as file:
+        diff=file.readlines()
+    file.close()
+    list=detect_extracted_method(diff)
+    return list
+
+def find_duplicates(list1, list2):
+    """
+    查找两个列表中的重复元素
+    :param list1: 第一个列表
+    :param list2: 第二个列表
+    :return: 包含重复元素的列表
+    """
+    # 将两个列表转换为集合，找出它们的交集
+    duplicates = list(set(list1) & set(list2))
+    return duplicates
+
+
+
+def refactor_rename(diffs):
+    func_definition_del=[]
+    func_definition_add = []
+    rename_flag=0
+    flag=0
+    for diff in diffs:
+        for line in diff:
+            if line.startswith('+'):
+                # 去除+前缀
+                stripped_line = line[1:]
+                if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                    func_name=extract_function_name(line)
+                    func_definition_add.append(func_name)
+            if line.startswith('-'):
+                # 去除+前缀
+                stripped_line = line[1:]
+                if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                    func_name=extract_function_name(line)
+                    func_definition_del.append(func_name)
+    duplicate=find_duplicates(func_definition_add,func_definition_del)
+    if duplicate!=[]:
+        print("有重命名！")
+        rename_diff = []
+        for diff in diffs:
+            flag=flag+1
+            for line in diff:
+
+                if line.startswith('+'):
+                    # 去除+前缀
+                    stripped_line = line[1:]
+                    if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                        func_name = extract_function_name(line)
+
+                        if func_name==duplicate[0]:
+
+                            rename_flag=flag
+                            rename_diff=remove_sublist_tran_2(rename_diff,line)
+
+                if line.startswith('-'):
+                    # 去除+前缀
+                    stripped_line = line[1:]
+                    if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                        func_name = extract_function_name(line)
+                        if func_name==duplicate[0]:
+
+                            rename_diff=remove_sublist_tran_2(diff,line)
+
+
+
+        # print(rename_diff)
+        # print(rename_flag)
+        diffs[rename_flag - 1] = rename_diff
+
+
+    real_list = []
+    for diff in diffs:
+        if clean_and_check_list(diff):
+            real_list.append(diff)
+
+
+    return real_list
+
+
+
+
+def remove_special_comments(code_list):
+    result = []
+    for line in code_list:
+        stripped_line = line.lstrip()  # 去除行首的空白字符
+        if stripped_line.startswith('+') or stripped_line.startswith('-'):
+            stripped_line = stripped_line[1:].lstrip()  # 去除 + 或 - 后的空白字符
+            stripped_line=stripped_line.lstrip('\t')
+            if not (stripped_line.startswith('//') or stripped_line.startswith('/*') or stripped_line.startswith('*/') or stripped_line.startswith('* ')):
+                result.append(line)
+        else:
+            result.append(line)
+    return result
+
+def delete_comment(list):
+    list_1=[]
+    for diff in list:
+        list_1.append(remove_special_comments(diff))
+
+    real_list = []
+    for diff in list_1:
+        if clean_and_check_list(diff):
+            real_list.append(diff)
+
+    return real_list
+
+
+def refactor_new_func(diffs):
+    again=False
+    new = False
+    flag=0
+    for ev_list in diffs:
+
+        flag = flag + 1
+        # 步骤1：识别新增函数定义
+        new_funcs = find_new_functions(ev_list)
+
+        if new_funcs != []:
+            print("存在新增函数!")
+            if len(new_funcs)!=1:
+                again=True
+            new_func_flag = flag
+
+            new_func_code = new_funcs[0]
+
+            # # 步骤2：查找新增函数的调用
+            # for line in new_funcs[0]:
+            #     if any(line.startswith(t) for t in types) and '(' in line and ')' in line:
+            #         func_name = extract_function_name(line)
+            # #print(func_name)
+            # func_body = extract_function_body(new_funcs[0])
+            # #print(func_body)
+            new = True
+
+        if new == True:
+
+            flag = 0
+            for ev_list in diffs:
+                flag = flag + 1
+                if flag == new_func_flag and new_func_flag != 0:
+                    # 删除子列表
+                    result_new_list = remove_sublist_new(ev_list, new_func_code)
+
+
+            diffs[new_func_flag - 1] = result_new_list
+
+    if again==True:
+        diffs=refactor_new_func(diffs)
+
+    if diffs is not None:
+        real_list = []
+        for diff in diffs:
+            if clean_and_check_list(diff):
+                real_list.append(diff)
+
+        return real_list
+    else:
+        print("有问题")
+
+def refactor_empty_line(diffs):
+    new_diffs=[]
+    for diff in diffs:
+        new_diff=[]
+        for line in diff:
+            if line.startswith("+") or line.startswith("-"):
+                strip_line = line[1:].lstrip()
+                if strip_line:
+                    new_diff.append(line)
+            else:
+                new_diff.append(line)
+        new_diffs.append(new_diff)
+    return new_diffs
+
+
+def old_and_new_name(diffs):
+    func_definition_del = []
+    func_definition_add = []
+    new_name_b_file = []
+    new_name_a_file = []
+    RENAME=False
+    rename_flag = 0
+    flag = 0
+    for diff in diffs:
+        for line in diff:
+            if line.startswith('+'):
+                # 去除+前缀
+                stripped_line = line[1:]
+                if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                    func_name = extract_function_name(line)
+                    func_definition_add.append(func_name)
+            if line.startswith('-'):
+                # 去除+前缀
+                stripped_line = line[1:]
+                if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                    func_name = extract_function_name(line)
+                    func_definition_del.append(func_name)
+    duplicate = find_duplicates(func_definition_add, func_definition_del)
+    if duplicate != []:
+        print("有重命名！")
+        RENAME=True
+        rename_diff = []
+        for diff in diffs:
+            flag = flag + 1
+            for line in diff:
+
+                if line.startswith('+'):
+                    # 去除+前缀
+                    stripped_line = line[1:]
+                    if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                        func_name = extract_function_name(line)
+
+                        if func_name == duplicate[0]:
+                            new_name_b_file.append(stripped_line)
+                            rename_flag = flag
+                            rename_diff = remove_sublist_tran_2(rename_diff, line)
+
+                if line.startswith('-'):
+                    # 去除+前缀
+                    stripped_line = line[1:]
+                    if any(stripped_line.startswith(t) for t in types) and '(' in line and ')' in line:
+                        func_name = extract_function_name(line)
+                        if func_name == duplicate[0]:
+                            new_name_a_file.append(stripped_line)
+                            rename_diff = remove_sublist_tran_2(diff, line)
+
+
+    return RENAME,new_name_a_file,new_name_b_file
+
+def old_and_new_func(cve_id):
+    # 处理方法提取的重构
+    list1 = refactor_detect_extracted("CVE/" + cve_id + "/patch.txt")
+    # 处理重命名的重构
+    RENAME=False
+    RENAME,new_name_a_file,new_name_b_file = old_and_new_name(list1)
+    return RENAME,new_name_a_file,new_name_b_file
+
+
+
+def main(cve_id):
+    #处理方法提取的重构
+    list1=refactor_detect_extracted("CVE/"+cve_id+"/patch.txt")
+    #处理重命名的重构
+    list2=refactor_rename(list1)
+    #去掉注释
+    list3=delete_comment(list2)
+    #去掉没有调用的新增函数
+    list4=refactor_new_func(list3)
+    #去掉空行
+    list5=refactor_empty_line(list4)
+    # for diff in list5:
+    #     for line in diff:
+    #         print(line)
+
+    return list5
+
+
+if __name__ == "__main__":
+    CVE_id="CVE-2023-45863"
+    main(CVE_id)
+    old_and_new_func(CVE_id)
+
